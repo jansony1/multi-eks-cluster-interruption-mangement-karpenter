@@ -100,31 +100,354 @@ Karpenter是AWS提出的kubernetes工作节点动态伸缩工具，其区别于C
     ```
     即为启动karpenter controller对于步骤1中配置的事件和SQS队列消息的监听和处理。
 
-回顾完原始的步骤后，首先进行拆解的设计为，只在第一个集群的配置中配置Eventbridge Rule，后续集群只创建对应的SQS队列并动态在上述Rule中的添加新的SQS队列为Target。然而参照官方文档可知，同一条Eventbridge Rule最大的触发Target为5，并且为硬限制不可修改。考虑到该方案的局限性，顾并不对此方案进行进一步探讨。但是我们应用同样的解耦思路进行下一方案的探索。
+回顾完原始的步骤后，首先进行拆解的设计为只在第一个集群的配置中配置Eventbridge Rule，后续集群只创建对应的SQS队列并动态在上述Rule中的添加新的SQS队列为Target。然而参照官方文档可知，同一条Eventbridge Rule最大的触发Target为5，并且为硬限制不可修改。考虑到该方案的局限性，故并不对此方案进行进一步探讨。但是我们应用同样的解耦思路进行下一方案的探索。
 
-## 基于Lambda Fan-Out改进方案介绍及测试
+## 基于Lambda Fan-Out改进方案的介绍及测试
 ### 方案介绍
 
 借鉴SNS+SQS的Fan-out设计，并结合不同事件需要分发到不同SQS的需求，故采用基于Lambda替代SNS，进行事件的精准分发，项目的架构如下所示：
 ![](./images/new_design.png)
 其整体的流程为：
 * 在第一个集群中生成中，配置全套的lambda和监听事件，在后续的集群/karpenter的安装中只生成对应集群的SQS和配置监听
-* 当对应集群有Interruption事件产生时，lambda函数基于instance-id判断发生事件的集群，从而把对应的事件指向性投递到队列中
-* Karpenter通过监听队列，进行对应Interruption事件的处理
+* 当对应集群有Interruption事件产生时，lambda函数通过instance-id得到对应的Tag从而判断发生事件的集群，进而把对应的事件指向性投递到队列中
+* 每个集群的Karpenter通过监听对应SQS队列，进行对应Interruption事件的处理
 
+### 具体部署
+在具体部署中，在第一次集群中会生成对应的SQS以及基于Lambda的事件分发总线，在之后的部署中只会进行相应SQS的配套部署. 我们实验中会参照Karpenter官方的[部署](https://karpenter.sh/v0.27.3/getting-started/getting-started-with-karpenter/)流程，进行整体的部署，其中相关的前提条件也请参考部署链接，
 
+#### 首个/基础集群部署
+下载项目
+```
+$ git clone https://github.com/jansony1/multi-cluster-mangement-karpenter.git
+$ cd multi-cluster-mangement-karpenter
+```
+配置环境变量
+```
+$ export KARPENTER_VERSION=v0.27.3
+$ export CLUSTER_NAME="base"
+$ export AWS_DEFAULT_REGION="us-west-2"
+$ export AWS_ACCOUNT_ID="$(aws sts get-caller-identity --query Account --output text)"
+$ export TEMPOUT=$(mktemp)
+```
+安装事件总线和karpenter相关的权限
+```
+$ aws cloudformation deploy \
+  --stack-name "Karpenter-${CLUSTER_NAME}" \
+  --template-file ./cloudformations/multi_cluster_infra_stack.yaml \
+  --capabilities CAPABILITY_NAMED_IAM \
+  --parameter-overrides "ClusterName=${CLUSTER_NAME}"
+```
+创建集群
+```
+$ eksctl create cluster -f - <<EOF
+---
+apiVersion: eksctl.io/v1alpha5
+kind: ClusterConfig
+metadata:
+  name: ${CLUSTER_NAME}
+  region: ${AWS_DEFAULT_REGION}
+  version: "1.24"
+  tags:
+    karpenter.sh/discovery: ${CLUSTER_NAME}
+
+iam:
+  withOIDC: true
+  serviceAccounts:
+  - metadata:
+      name: karpenter
+      namespace: karpenter
+    roleName: ${CLUSTER_NAME}-karpenter
+    attachPolicyARNs:
+    - arn:aws:iam::${AWS_ACCOUNT_ID}:policy/KarpenterControllerPolicy-${CLUSTER_NAME}
+    roleOnly: true
+
+iamIdentityMappings:
+  - arn: "arn:aws:iam::${AWS_ACCOUNT_ID}:role/KarpenterNodeRole-${CLUSTER_NAME}"
+    username: system:node:{{EC2PrivateDNSName}}
+    groups:
+    - system:bootstrappers
+    - system:nodes
+
+  managedNodeGroups:
+  - instanceType: m5.large
+    amiFamily: AmazonLinux2
+    name: ${CLUSTER_NAME}-ng
+    desiredCapacity: 2
+EOF
+```
+配置相关权限的环境变量
+```
+$ export CLUSTER_ENDPOINT="$(aws eks describe-cluster --name ${CLUSTER_NAME} --query "cluster.endpoint" --output text)"
+$ export KARPENTER_IAM_ROLE_ARN="arn:aws:iam::${AWS_ACCOUNT_ID}:role/${CLUSTER_NAME}-karpenter"
+
+$ echo $CLUSTER_ENDPOINT $KARPENTER_IAM_ROLE_ARN
+```
+安装Karpenter
+
+```
+$ docker logout public.ecr.aws
+
+$ helm upgrade --install karpenter oci://public.ecr.aws/karpenter/karpenter --version ${KARPENTER_VERSION} --namespace karpenter --create-namespace \
+  --set serviceAccount.annotations."eks\.amazonaws\.com/role-arn"=${KARPENTER_IAM_ROLE_ARN} \
+  --set settings.aws.clusterName=${CLUSTER_NAME} \
+  --set settings.aws.defaultInstanceProfile=KarpenterNodeInstanceProfile-${CLUSTER_NAME} \
+  --set settings.aws.interruptionQueueName=${CLUSTER_NAME} \
+  --set controller.resources.requests.cpu=1 \
+  --set controller.resources.requests.memory=1Gi \
+  --set controller.resources.limits.cpu=1 \
+  --set controller.resources.limits.memory=1Gi \
+  --wait
+  ```
+配置对应的Provisioner
+```
+$ cat <<EOF | kubectl apply -f -
+apiVersion: karpenter.sh/v1alpha5
+kind: Provisioner
+metadata:
+  name: default
+spec:
+  annotations:
+    example.com/owner: aws
+  requirements:
+    - key: karpenter.sh/capacity-type
+      operator: In
+      values: ["spot"]
+    - key: node.kubernetes.io/instance-type
+      operator: In
+      values: ["m5.xlarge", "m5.2xlarge"]
+  ttlSecondsAfterEmpty: 30
+  ttlSecondsUntilExpired: 2592000
+  providerRef:
+    name: default
+
+---
+apiVersion: karpenter.k8s.aws/v1alpha1
+kind: AWSNodeTemplate
+metadata:
+  name: default
+spec:
+  tags:
+    nodeBelongTo: aws
+  subnetSelector:
+    karpenter.sh/discovery: ${CLUSTER_NAME}
+  securityGroupSelector:
+    karpenter.sh/discovery: ${CLUSTER_NAME}
+
+EOF
+```
+此时整个Karpenter和其相关的Interruption事件处理总线的Infra已经构建完毕，有兴趣的读者可以通过以下方式查看相关配置和Lambda函数的逻辑
+```
+$ cat ./cloudformations/multi_cluster_infra_stack.yaml
+```
+相较于社区原始的设计，此处把4类相关事件都把触发目标改为了基于Lambda的事件总线。然后在Lambda中基于EC2的tag来判断将事件发送到哪个Cluster种
+
+#### 其他业务集群部署
+对于除了需要配置事件总线的初始化集群以外的其他集群来说，主要的差别为
+* Cluster的名字需要在配置环境变量步骤进行替换
+* 对应的Cloudformation需要替换成非Infra版本的
+  
+因此，我们摘取差异化的两步，进行部署，其他流程请参照基础版的集群部署
+
+配置环境变量
+```
+$ export KARPENTER_VERSION=v0.27.3
+$ export CLUSTER_NAME="tenant-1-cluster"
+$ export AWS_DEFAULT_REGION="us-west-2"
+$ export AWS_ACCOUNT_ID="$(aws sts get-caller-identity --query Account --output text)"
+$ export TEMPOUT=$(mktemp)
+```
+安装事件总线和karpenter相关的权限
+```
+$ aws cloudformation deploy \
+  --stack-name "Karpenter-${CLUSTER_NAME}" \
+  --template-file ./cloudformations/multi_cluster_other_stack.yaml \
+  --capabilities CAPABILITY_NAMED_IAM \
+  --parameter-overrides "ClusterName=${CLUSTER_NAME}"
+```
+
+部署完毕后，可以在EKS控制台同时看到基础集群以及业务集群tenant-1-cluster
 
 ### 使用FIS（Fault Ingestion simulator）来进行模拟测试
 
-配置测试事件
+下面我们用AWS的[FIS](https://aws.amazon.com/cn/fis/)服务来模拟
+* 基础cluster和业务集群单个节点发生Spot中断事件的处理情况，以及是否会产生集群间干扰
+* Tenant-1-cluster中多个节点分别发生Spot中断事件后的处理情况，以及是否会产生集群间干扰
 
-执行测试
+#### 部署示例应用触发Karpenter生成Spot节点
+在本文中，两个Cluster的托管工作节点其均为2核，那么我们分别在两个Cluster中部署一个3核需求的应用.
 
+查看当前集群
+```
+$ eksctl get cluster
+NAME			REGION		EKSCTL CREATED
+infra	us-west-2	True
+tenant-1-cluster		us-west-2	True
+```
 
+部署示例应用
+```
+$ cat <<EOF | kubectl apply -f -
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: inflate
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: inflate
+  template:
+    metadata:
+      labels:
+        app: inflate
+    spec:
+      terminationGracePeriodSeconds: 0
+      containers:
+        - name: inflate
+          image: public.ecr.aws/eks-distro/kubernetes/pause:3.7
+          resources:
+            requests:
+              cpu: 3
+EOF
+```
+查看状态
+```
+$ kubectl get pods -owide
+$ kubectl get pods -owide
+NAME                      READY   STATUS    RESTARTS   AGE   IP                NODE                                          NOMINATED NODE   READINESS GATES
+inflate-d4d675747-sqdqw   1/1     Running   0          38m   192.168.160.221   ip-192-168-170-8.us-west-2.compute.internal   <none>           <none>
+$ kubectl get nodes
+NAME                                          STATUS   ROLES    AGE   VERSION
+ip-192-168-1-230.us-west-2.compute.internal   Ready    <none>   81m   v1.24.11-eks-a59e1f0
+ip-192-168-170-8.us-west-2.compute.internal   Ready    <none>   39m   v1.24.11-eks-a59e1f0
+ip-192-168-87-89.us-west-2.compute.internal   Ready    <none>   81m   v1.24.11-eks-a59e1f0
+```
+发现基于Karpenter动态生成的节点已经运行. 然后切换到tenant-1-cluster，重复上述动作。但是Deployment的replica数量调整为8，来模拟大规模interruption情况下的处理能力,以及测试两个集群事件是否会互相干扰。
+```
+$ cat <<EOF | kubectl apply -f -
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: inflate
+spec:
+  replicas: 10
+  selector:
+    matchLabels:
+      app: inflate
+  template:
+    metadata:
+      labels:
+        app: inflate
+    spec:
+      terminationGracePeriodSeconds: 0
+      containers:
+        - name: inflate
+          image: public.ecr.aws/eks-distro/kubernetes/pause:3.7
+          resources:
+            requests:
+              cpu: 3
+EOF
+```
+
+#### 配置测试事件
+在FIS中，我们分别基于tag选定对应的EKS集群，配置对应的测试实验. 配置针对于基础cluster的模版。分别入下图所示
+![](./images/fis_base.png)
+![](./images/fis_tenant-1.png)
+
+#### 执行测试和观察结果
+**实验1:** 基础cluster和业务集群单个节点发生Spot中断事件的处理情况
+
+点击上一步骤中生成的针对于基础cluster的模版，执行Start。点击Experiment Log Event观察到如下，说明事件触发完毕.
+![](./images/fis_log.png)
+然后查看Karpenter Controller日志
+```
+### Interruption detection
+2023-04-24T14:39:51.074Z	DEBUG	controller.interruption	removing offering from offerings	{"commit": "beb0a64-dirty", "queue": "karpenter-base", "messageKind": "SpotInterruptionKind", "node": "ip-192-168-124-105.us-west-2.compute.internal", "action": "CordonAndDrain", "reason": "SpotInterruptionKind", "instance-type": "m5.xlarge", "zone": "us-west-2c", "capacity-type": "spot", "ttl": "3m0s"}
+
+## Graceful deletion
+2023-04-24T14:39:51.090Z	INFO	controller.interruption	deleted node from interruption message	{"commit": "beb0a64-dirty", "queue": "karpenter-base", "messageKind": "SpotInterruptionKind", "node": "ip-192-168-124-105.us-west-2.compute.internal", "action": "CordonAndDrain"}
+2023-04-24T14:39:51.091Z	INFO	controller.termination	cordoned node	{"commit": "beb0a64-dirty", "node": "ip-192-168-124-105.us-west-2.compute.internal"}
+2023-04-24T14:39:51.458Z	INFO	controller.termination	deleted node	{"commit": "beb0a64-dirty", "node": "ip-192-168-124-105.us-west-2.compute.internal"}
+2023-04-24T14:39:51.703Z	INFO	controller.termination	deleted node	{"commit": "beb0a64-dirty", "node": "ip-192-168-124-105.us-west-2.compute.internal"}
+2023-04-24T14:39:52.252Z	INFO	controller.provisioner	found provisionable pod(s)	{"commit": "beb0a64-dirty", "pods": 1}
+2023-04-24T14:39:52.252Z	INFO	controller.provisioner	computed new node(s) to fit pod(s)	{"commit": "beb0a64-dirty", "nodes": 1, "pods": 1}
+2023-04-24T14:39:52.252Z	INFO	controller.provisioner	launching machine with 1 pods requesting {"cpu":"3125m","pods":"4"} from types m5.xlarge, m5.2xlarge	{"commit": "beb0a64-dirty", "provisioner": "default"}
+2023-04-24T14:39:52.434Z	DEBUG	controller.provisioner.cloudprovider	created launch template	{"commit": "beb0a64-dirty", "provisioner": "default", "launch-template-name": 
+"karpenter-base-12738716852343601265", "launch-template-id": "lt-04a670291a536d43e"}
+
+## Launch new Spot instance
+2023-04-24T14:39:54.554Z	INFO	controller.provisioner.cloudprovider	launched new instance	{"commit": "beb0a64-dirty", "provisioner": "default", "id": "i-0e2deaedad42065ac", "hostname": "ip-192-168-188-93.us-west-2.compute.internal", "instance-type": "m5.xlarge", "zone": "us-west-2a", "capacity-type": 
+```
+上述controller日志经过拆解，主要分为三部分
+* Detect interruption
+* Graceful deletion
+* Launch new Spot instance 
+
+结合FIS日志可以看出从事件发生(14:39:48)到事件处理完毕（14:39:54)，总计6秒的事件即可完成整个interruption事件的处理。最后查看对应的karpenter-base SQS队列，发现所有事件均被处理完成. 另外查看karpenter-tenant-1队列，并无新消息传递。
+
+**实验2** :Tenant-1-cluster中多个节点分别发生Spot中断事件后的处理情况
+
+查看当前集群节点情况
+```
+$ kubectl get nodes
+NAME                                            STATUS   ROLES    AGE    VERSION
+ip-192-168-1-230.us-west-2.compute.internal     Ready    <none>   160m   v1.24.11-eks-a59e1f0
+ip-192-168-141-174.us-west-2.compute.internal   Ready    <none>   20m    v1.24.11-eks-a59e1f0
+ip-192-168-189-225.us-west-2.compute.internal   Ready    <none>   102s   v1.24.11-eks-a59e1f0
+ip-192-168-33-98.us-west-2.compute.internal     Ready    <none>   20m    v1.24.11-eks-a59e1f0
+ip-192-168-57-234.us-west-2.compute.internal    Ready    <none>   20m    v1.24.11-eks-a59e1f0
+ip-192-168-67-99.us-west-2.compute.internal     Ready    <none>   20m    v1.24.11-eks-a59e1f0
+ip-192-168-87-89.us-west-2.compute.internal     Ready    <none>   160m   v1.24.11-eks-a59e1f0
+```
+可以发现，除了managed节点，karpenter基于动态合并选择的特性，生成了3个m5.2xlarge节点和两个m5.xlarge。
+> FIS同时触发的instance限制也是5
+
+点击上一步骤中生成的tenant-1-cluster的模版，执行Start。查看Event log如下图所示
+![](./images/fis_log2.png)
+进一步查看Karpenter controller的日志
+```
+2023-04-24T15:27:34.344Z	DEBUG	controller.interruption	removing offering from offerings	{"commit": "d7e22b1-dirty", "queue": "other-cluster", "messageKind": "SpotInterruptionKind", "node": "ip-192-168-141-174.us-west-2.compute.internal", "action": "CordonAndDrain", "reason": "SpotInterruptionKind", "instance-type": "m5.2xlarge", "zone": "us-west-2c", "capacity-type": "spot", "ttl": "3m0s"}
+2023-04-24T15:27:34.359Z	INFO	controller.interruption	deleted node from interruption message	{"commit": "d7e22b1-dirty", "queue": "other-cluster", "messageKind": "SpotInterruptionKind", "node": "ip-192-168-141-174.us-west-2.compute.internal", "action": "CordonAndDrain"}
+2023-04-24T15:27:34.417Z	INFO	controller.termination	cordoned node	{"commit": "d7e22b1-dirty", "node": "ip-192-168-141-174.us-west-2.compute.internal"}
+2023-04-24T15:27:34.567Z	DEBUG	controller.interruption	removing offering from offerings	{"commit": "d7e22b1-dirty", "queue": "other-cluster", "messageKind": "SpotInterruptionKind", "node": "ip-192-168-189-225.us-west-2.compute.internal", "action": "CordonAndDrain", "reason": "SpotInterruptionKind", "instance-type": "m5.xlarge", "zone": "us-west-2a", "capacity-type": "spot", "ttl": "3m0s"}
+2023-04-24T15:27:34.586Z	INFO	controller.interruption	deleted node from interruption message	{"commit": "d7e22b1-dirty", "queue": "other-cluster", "messageKind": "SpotInterruptionKind", "node": "ip-192-168-189-225.us-west-2.compute.internal", "action": "CordonAndDrain"}
+2023-04-24T15:27:34.660Z	INFO	controller.termination	cordoned node	{"commit": "d7e22b1-dirty", "node": "ip-192-168-189-225.us-west-2.compute.internal"}
+2023-04-24T15:27:34.684Z	DEBUG	controller.interruption	removing offering from offerings	{"commit": "d7e22b1-dirty", "queue": "other-cluster", "messageKind": "SpotInterruptionKind", "node": "ip-192-168-67-99.us-west-2.compute.internal", "action": "CordonAndDrain", "reason": "SpotInterruptionKind", "instance-type": "m5.xlarge", "zone": "us-west-2a", "capacity-type": "spot", "ttl": "3m0s"}
+2023-04-24T15:27:34.735Z	INFO	controller.interruption	deleted node from interruption message	{"commit": "d7e22b1-dirty", "queue": "other-cluster", "messageKind": "SpotInterruptionKind", "node": "ip-192-168-67-99.us-west-2.compute.internal", "action": "CordonAndDrain"}
+2023-04-24T15:27:34.762Z	INFO	controller.termination	cordoned node	{"commit": "d7e22b1-dirty", "node": "ip-192-168-67-99.us-west-2.compute.internal"}
+2023-04-24T15:27:34.986Z	INFO	controller.termination	deleted node	{"commit": "d7e22b1-dirty", "node": "ip-192-168-141-174.us-west-2.compute.internal"}
+2023-04-24T15:27:35.179Z	DEBUG	controller.interruption	removing offering from offerings	{"commit": "d7e22b1-dirty", "queue": "other-cluster", "messageKind": "SpotInterruptionKind", "node": "ip-192-168-57-234.us-west-2.compute.internal", "action": "CordonAndDrain", "reason": "SpotInterruptionKind", "instance-type": "m5.2xlarge", "zone": "us-west-2c", "capacity-type": "spot", "ttl": "3m0s"}
+2023-04-24T15:27:35.194Z	INFO	controller.interruption	deleted node from interruption message	{"commit": "d7e22b1-dirty", "queue": "other-cluster", "messageKind": "SpotInterruptionKind", "node": "ip-192-168-57-234.us-west-2.compute.internal", "action": "CordonAndDrain"}
+2023-04-24T15:27:35.236Z	INFO	controller.termination	cordoned node	{"commit": "d7e22b1-dirty", "node": "ip-192-168-57-234.us-west-2.compute.internal"}
+2023-04-24T15:27:35.270Z	DEBUG	controller.interruption	removing offering from offerings	{"commit": "d7e22b1-dirty", "queue": "other-cluster", "messageKind": "SpotInterruptionKind", "node": "ip-192-168-33-98.us-west-2.compute.internal", "action": "CordonAndDrain", "reason": "SpotInterruptionKind", "instance-type": "m5.2xlarge", "zone": "us-west-2c", "capacity-type": "spot", "ttl": "3m0s"}
+2023-04-24T15:27:35.308Z	INFO	controller.interruption	deleted node from interruption message	{"commit": "d7e22b1-dirty", "queue": "other-cluster", "messageKind": "SpotInterruptionKind", "node": "ip-192-168-33-98.us-west-2.compute.internal", "action": "CordonAndDrain"}
+2023-04-24T15:27:35.333Z	INFO	controller.termination	cordoned node	{"commit": "d7e22b1-dirty", "node": "ip-192-168-33-98.us-west-2.compute.internal"}
+2023-04-24T15:27:35.435Z	INFO	controller.termination	deleted node	{"commit": "d7e22b1-dirty", "node": "ip-192-168-67-99.us-west-2.compute.internal"}
+2023-04-24T15:27:35.445Z	INFO	controller.termination	deleted node	{"commit": "d7e22b1-dirty", "node": "ip-192-168-189-225.us-west-2.compute.internal"}
+2023-04-24T15:27:35.870Z	INFO	controller.termination	deleted node	{"commit": "d7e22b1-dirty", "node": "ip-192-168-57-234.us-west-2.compute.internal"}
+2023-04-24T15:27:35.890Z	INFO	controller.termination	deleted node	{"commit": "d7e22b1-dirty", "node": "ip-192-168-33-98.us-west-2.compute.internal"}
+2023-04-24T15:27:38.317Z	INFO	controller.provisioner	found provisionable pod(s)	{"commit": "d7e22b1-dirty", "pods": 8}
+2023-04-24T15:27:38.317Z	INFO	controller.provisioner	computed new machine(s) to fit pod(s)	{"commit": "d7e22b1-dirty", "machines": 4, "pods": 8}
+2023-04-24T15:27:38.317Z	INFO	controller.provisioner	launching machine with 2 pods requesting {"cpu":"6125m","pods":"4"} from types m5.2xlarge	{"commit": "d7e22b1-dirty", "provisioner": "default"}
+2023-04-24T15:27:38.328Z	INFO	controller.provisioner	launching machine with 2 pods requesting {"cpu":"6125m","pods":"4"} from types m5.2xlarge	{"commit": "d7e22b1-dirty", "provisioner": "default"}
+2023-04-24T15:27:38.338Z	INFO	controller.provisioner	launching machine with 2 pods requesting {"cpu":"6125m","pods":"4"} from types m5.2xlarge	{"commit": "d7e22b1-dirty", "provisioner": "default"}
+2023-04-24T15:27:38.348Z	INFO	controller.provisioner	launching machine with 2 pods requesting {"cpu":"6125m","pods":"4"} from types m5.2xlarge	{"commit": "d7e22b1-dirty", "provisioner": "default"}
+2023-04-24T15:27:38.605Z	DEBUG	controller.provisioner.cloudprovider	discovered launch template	{"commit": "d7e22b1-dirty", "provisioner": "default", "launch-template-name": "karpenter.k8s.aws/3843415971142493028"}
+
+## Launch new spot instance 
+2023-04-24T15:27:41.691Z	INFO	controller.provisioner.cloudprovider	launched instance	{"commit": "d7e22b1-dirty", "provisioner": "default", "id": "i-0a458f323d52c9380", "hostname": "ip-192-168-64-130.us-west-2.compute.internal", "instance-type": "m5.2xlarge", "zone": "us-west-2a", "capacity-type": "spot", "capacity": {"cpu":"8","ephemeral-storage":"20Gi","memory":"30310Mi","pods":"58"}}
+2023-04-24T15:27:41.691Z	INFO	controller.provisioner.cloudprovider	launched instance	{"commit": "d7e22b1-dirty", "provisioner": "default", "id": "i-0c482c9d0e12560de", "hostname": "ip-192-168-171-10.us-west-2.compute.internal", "instance-type": "m5.2xlarge", "zone": "us-west-2a", "capacity-type": "spot", "capacity": {"cpu":"8","ephemeral-storage":"20Gi","memory":"30310Mi","pods":"58"}}
+2023-04-24T15:27:41.691Z	INFO	controller.provisioner.cloudprovider	launched instance	{"commit": "d7e22b1-dirty", "provisioner": "default", "id": "i-049d6c4095bdde7a8", "hostname": "ip-192-168-175-127.us-west-2.compute.internal", "instance-type": "m5.2xlarge", "zone": "us-west-2a", "capacity-type": "spot", "capacity": {"cpu":"8","ephemeral-storage":"20Gi","memory":"30310Mi","pods":"58"}}
+2023-04-24T15:27:41.691Z	INFO	controller.provisioner.cloudprovider	launched instance	{"commit": "d7e22b1-dirty", "provisioner": "default", "id": "i-01f006230f5e0c808", "hostname": "ip-192-168-85-3.us-west-2.compute.internal", "instance-type": "m5.2xlarge", "zone": "us-west-2a", "capacity-type": "spot", "capacity": {"cpu":"8","ephemeral-storage":"20Gi","memory":"30310Mi","pods":"58"}}
+```
+可以看到，相较于单一节点的interruption事件，Karpenter在并行交替处理多个节点的事件，最终成功新Launch了4台m5.2xlarge
+> 在生产集群中，如果大规模使用Spot示例，建议调大karpenter controller的CPU和内存等配置
+
+最后查看，karpenter-tenant-1 SQS和karpenter-base SQS，发现消息被及时处理，也未出现干扰情况。
 
 ## 总结
 
-本文阐述了一种在客户在基于karpenter进行多集群Interruption事件管理的优化设计，其从易用性和可维护性等多个角度都进行了改善。目前遗留的最大问题还是在很多EventBridge事件中无法进行对应节点Tag的传递，从而产生了很多无效的调用，希望后续能够得到完善，从而进一步简化调用的流程。另外从成本的角度来说，可以在本文的RouterLambda前再配一集中化的SQS，即所有事件统一发送到该SQS，利用Lambda的Batch机制批量处理对应请教，然后再进行批量的发送到指定下游队列中。
+本文阐述了一种客户在基于karpenter进行多集群Spot Interruption事件管理的优化设计，其从易用性和可维护性等多个角度都进行了改善。目前遗留的主要问题还是在很多EventBridge事件中无法进行对应节点Tag的传递，从而产生了很多无效的调用，希望后续能够得到完善，从而进一步简化调用的流程。另外从成本的角度来说，可以在本文的RouterLambda前再配一集中化的SQS，即所有事件统一发送到该SQS，利用Lambda的Batch机制批量处理对应请求，然后再进行批量发送到指定的下游队列中。
 
 
 ## 参考文档
