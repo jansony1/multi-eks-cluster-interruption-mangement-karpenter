@@ -2,13 +2,13 @@
 ## 项目背景
 Karpenter是AWS提出的kubernetes工作节点动态伸缩工具，其区别于CA（Cluster AutoScaler），具有Groupless，效率高，跟AWS集成更为紧密等众多优势。目前，越来越多的客户开始使用Karpenter来简化和优化他们的EKS集群自动扩展流程。特别是对于那些需要快速增加或减少节点数量以适应流量波动的企业来说，Karpenter可以帮助他们更好地管理他们的资源。另外采用Spot作为EKS的工作节点也成为了很多客户节约成本的一大重要手段。在Karpenter中，对于如何处理Spot实例回收带来的不稳定性影响，提供了两种方案：
 * 方案1: 基于NTH（node termination handler）
-* 方案2: 基于Evenbridge的事件触发机制（社区默认方案）
+* 方案2: 基于Evenbridge的事件触发机制（社区当前默认方案）
 
-对于方案1，之前已经有很多文章进行了相关阐述，如[Kubernetes 节点弹性伸缩开源组件 Karpenter 实践：使用 Spot 实例进行成本优化](https://aws.amazon.com/cn/blogs/china/kubernetes-node-elastic-scaling-open-source-component-karpenter-practice-cost-optimization-using-spot-instance/). 本文主要的目的是对于方案2进行阐述，并提供了在实际应用场景中，如何基于Fan-out的理念使其更优雅的对多集群Interruption事件进行处理。
+对于方案1，之前已经有很多文章进行了相关阐述，如[Kubernetes 节点弹性伸缩开源组件 Karpenter 实践：使用 Spot 实例进行成本优化](https://aws.amazon.com/cn/blogs/china/kubernetes-node-elastic-scaling-open-source-component-karpenter-practice-cost-optimization-using-spot-instance/). 本文主要的目的是对于方案2进行阐述，并提供了在客户实际应用场景中，如何基于事件总线的理念使其更优雅的对多集群Spot Interruption事件进行处理。
 
 ## 方案介绍
 
-首先查看其目前设计的基本原理
+笔者首先根据个人理解绘制了当前的Interruption处理流程图
 
 ![](./images/original.png)
 
@@ -19,20 +19,20 @@ Karpenter是AWS提出的kubernetes工作节点动态伸缩工具，其区别于C
     * Instance Terminating Events
     * Instance Stopping Events
 * 每创建一个EKS集群，都对应的创建一组EvenBridge Rule和SQS对，用以接受和传递Interruption事件
-* 通过配置KarpenterController的configmap指向对应集群的SQS，来消费/处理上述事件
+* 通过配置Karpenter Controller的configmap指向对应集群的SQS，来消费/处理上述事件
 
-其中如果在单账户单region集群小的情况下，上述的设计并无不妥。但是，在实验中我们发现当集群数量的多时候我们会发现几个明显的问题
+其中如果在单账户单region集群少的情况下，上述的设计并无不妥。但是，在实验中我们发现当集群数量的多时候我们会发现几个明显的问题
 
 * 需要为每一个集群都创建一套规则，但是规则的内容却完全一样
   > 目前相关事件无法传递tag和基于tag过滤
 * 因为规则完全相同，任一集群发生的相关事件会发送到其他队列的SQS队列中进行消费
   > 查看源码可知，如果是非本集群消息，会直接进行删除
 
-基于设计带来的管理复杂性问题，笔者协同客户首先进行了解耦的设计. 在进行详细阐述前，我们首先回顾下，在官方文档中如何进行Karpenter及相关Interruption处理组件的安装.
+基于该设计带来的管理复杂性问题，笔者协同客户首先进行了解耦的设计. 在进行详细阐述前，首先回顾下在官方文档中如何进行Karpenter及相关Interruption处理组件的安装.
 
 1. 安装Interruption处理组件和初始化集群,[参考](https://karpenter.sh/v0.27.3/getting-started/getting-started-with-karpenter/)
    
-   在初始化配置中，提供了一个Cloudformation模版，其除了基本的Karpenter所需要的Role和权限等设置，还配置了对应的SQS队列和4个以其为目标的Evenbridge rule，如下:
+   在初始化配置中，提供了一个Cloudformation模版，其除了基本的Karpenter所需要的Role和权限等设置，还配置了对应的SQS队列和4个以其为目标的Evenbridge rule，如下所示:
    ```
    KarpenterInterruptionQueue:
     Type: AWS::SQS::Queue
@@ -98,14 +98,28 @@ Karpenter是AWS提出的kubernetes工作节点动态伸缩工具，其区别于C
     ```
     --set settings.aws.interruptionQueueName=${CLUSTER_NAME}
     ```
-    即为启动karpenter controller对于步骤1中配置的事件和SQS队列消息的监听和处理。
+    即为启动karpenter controller对于步骤1中配置的事件和SQS队列消息的监听和处理。**此处需要注意**，如果刚开始创建Karpenter的时候没有进行配置，那么后续处理启用的时候，需要参考如下进行enable: 
+    ```
+    apiVersion: v1
+    kind: ConfigMap
+    metadata:
+      name: karpenter-global-settings
+      namespace: karpenter
+    data:
+      ...
+      aws.interruptionQueueName: karpenter-cluster
+    ```
+    配置完成后需要执行对应Karpenter deployment 重启的操作使其生效
+    ```
+    $ kubectl rollout restart deployment karpenter
 
-回顾完原始的步骤后，首先进行拆解的设计为只在第一个集群的配置中配置Eventbridge Rule，后续集群只创建对应的SQS队列并动态在上述Rule中的添加新的SQS队列为Target。然而参照官方文档可知，同一条Eventbridge Rule最大的触发Target为5，并且为硬限制不可修改。考虑到该方案的局限性，故并不对此方案进行进一步探讨。但是我们应用同样的解耦思路进行下一方案的探索。
+    ```
+回顾完原始的步骤后，笔者最初和客户的设计为只在第一个集群的配置中配置Eventbridge Rule，后续集群只创建对应的SQS队列并动态在上述Rule中的添加新的SQS队列为Target。然而参照官方文档可知，同一条Eventbridge Rule最大的触发Target为5，并且为硬限制不可修改。考虑到该方案的局限性，故并不对此方案进行进一步探讨，但是我们应用同样的解耦思路进行下一方案的探索。
 
 ## 基于Lambda Fan-Out改进方案的介绍及测试
 ### 方案介绍
 
-借鉴SNS+SQS的Fan-out设计，并结合不同事件需要分发到不同SQS的需求，故采用基于Lambda替代SNS，进行事件的精准分发，项目的架构如下所示：
+借鉴事件总线的处理逻辑，新方案采用基于Lambda作为事件总线，基于不同EKS集群的特定标签，进行事件的精准分发，项目的架构如下所示：
 ![](./images/new_design.png)
 其整体的流程为：
 * 在第一个集群中生成中，配置全套的lambda和监听事件，在后续的集群/karpenter的安装中只生成对应集群的SQS和配置监听
@@ -113,7 +127,7 @@ Karpenter是AWS提出的kubernetes工作节点动态伸缩工具，其区别于C
 * 每个集群的Karpenter通过监听对应SQS队列，进行对应Interruption事件的处理
 
 ### 具体部署
-在具体部署中，在第一次集群中会生成对应的SQS以及基于Lambda的事件分发总线，在之后的部署中只会进行相应SQS的配套部署. 我们实验中会参照Karpenter官方的[部署](https://karpenter.sh/v0.27.3/getting-started/getting-started-with-karpenter/)流程，进行整体的部署，其中相关的前提条件也请参考部署链接，
+在具体部署中，在第一次集群中会生成对应的SQS以及基于Lambda的事件分发总线，在之后的部署中只会进行相应SQS的配套部署. 我们实验中会参照Karpenter官方的[部署](https://karpenter.sh/v0.27.3/getting-started/getting-started-with-karpenter/)流程，进行整体的部署，其中相关的前提条件也请参考部署链接。
 
 #### 首个/基础集群部署
 下载项目
@@ -197,7 +211,7 @@ $ helm upgrade --install karpenter oci://public.ecr.aws/karpenter/karpenter --ve
   --set controller.resources.limits.cpu=1 \
   --set controller.resources.limits.memory=1Gi \
   --wait
-  ```
+```
 配置对应的Provisioner
 ```
 $ cat <<EOF | kubectl apply -f -
@@ -239,14 +253,16 @@ EOF
 ```
 $ cat ./cloudformations/multi_cluster_infra_stack.yaml
 ```
-相较于社区原始的设计，此处把4类相关事件的触发目标都改为了基于Lambda的事件总线。然后在Lambda中基于EC2的tag来判断将事件发送到哪个SQS队列中进行后续处理。
+相较于社区原始的设计，此处把4类相关事件的触发目标都改为了基于Lambda的事件总线，并且基于源码的设计进一步过滤了监听的事件。具体实现逻辑中通过在Lambda中基于对EC2的Tag的识别，来将事件发送到指定集群的SQS队列中进行后续Karpenter Controller的处理。
+
 
 #### 其他业务集群部署
-对于除了需要配置事件总线的初始化集群以外的其他集群来说，主要的差别为
+对于除了需要配置事件总线的初始化集群以外的其他集群来说，其主要的差别为
 * Cluster的名字需要在配置环境变量步骤进行替换
 * 对应的Cloudformation需要替换成非Infra版本的
+  * 该集群只会设置相关Karpneter权限和SQS队列
   
-因此，我们摘取差异化的两步进行部署，其他流程请参照基础版的集群部署
+因此，我们后续只摘取差异化的两步进行阐述，其他流程请参照基础版的集群部署
 
 配置环境变量
 ```
@@ -274,7 +290,7 @@ $ aws cloudformation deploy \
 * Tenant-1-cluster中多个节点分别发生Spot中断事件后的处理情况，以及是否会产生集群间干扰
 
 #### 部署示例应用触发Karpenter生成Spot节点
-在本文中，两个Cluster的托管工作节点其均为2核，那么我们分别在两个Cluster中部署一个3核需求的应用.
+在本文中，两个cluster的托管工作节点均为2核，那么我们分别在两个Cluster中部署一个3核需求的应用，从而触发对应Spot节点的生成。
 
 查看当前集群
 ```
@@ -322,7 +338,7 @@ ip-192-168-1-230.us-west-2.compute.internal   Ready    <none>   81m   v1.24.11-e
 ip-192-168-170-8.us-west-2.compute.internal   Ready    <none>   39m   v1.24.11-eks-a59e1f0
 ip-192-168-87-89.us-west-2.compute.internal   Ready    <none>   81m   v1.24.11-eks-a59e1f0
 ```
-发现基于Karpenter动态生成的节点已经运行. 然后切换到tenant-1-cluster，重复上述动作。但是Deployment的replica数量调整为8，来模拟大规模interruption情况下的处理能力,以及测试两个集群事件是否会互相干扰。
+观察发现基于Karpenter动态生成的节点已经运行. 然后切换到tenant-1-cluster，重复上述动作，但是Deployment的replica数量调整为8，从而来模拟大规模interruption情况下该方案的处理能力,以及测试两个集群事件是否会产生互相干扰。
 ```
 $ cat <<EOF | kubectl apply -f -
 apiVersion: apps/v1
@@ -441,13 +457,13 @@ ip-192-168-87-89.us-west-2.compute.internal     Ready    <none>   160m   v1.24.1
 2023-04-24T15:27:41.691Z	INFO	controller.provisioner.cloudprovider	launched instance	{"commit": "d7e22b1-dirty", "provisioner": "default", "id": "i-01f006230f5e0c808", "hostname": "ip-192-168-85-3.us-west-2.compute.internal", "instance-type": "m5.2xlarge", "zone": "us-west-2a", "capacity-type": "spot", "capacity": {"cpu":"8","ephemeral-storage":"20Gi","memory":"30310Mi","pods":"58"}}
 ```
 可以看到，相较于单一节点的interruption事件，Karpenter在并行交替处理多个节点的事件，最终成功新Launch了4台m5.2xlarge
-> 在生产集群中，如果大规模使用Spot示例，建议调大karpenter controller的CPU和内存等配置
+> 在生产集群中，如果大规模使用Spot示例，建议适配Karpenter Controller的CPU和内存。
 
-最后查看，karpenter-tenant-1 SQS和karpenter-base SQS，发现消息被及时处理，也未出现干扰情况。
+最后查看karpenter-tenant-1 SQS和karpenter-base SQS，发现消息被及时处理，也未出现干扰情况。
 
 ## 总结
 
-本文阐述了一种客户在基于karpenter进行多集群Spot Interruption事件管理的优化设计，其从易用性和可维护性等多个角度都进行了改善。目前遗留的主要问题还是在很多EventBridge事件中无法进行对应节点Tag的传递，从而产生了很多无效的调用，希望后续能够得到完善，从而进一步简化调用的流程。另外从成本的角度来说，可以在本文的RouterLambda前再配一集中化的SQS，即所有事件统一发送到该SQS，利用Lambda的Batch机制批量处理对应请求，然后再进行批量发送到指定的下游队列中。
+本文阐述了一种客户在基于karpenter进行多集群Spot Interruption事件管理的优化设计，其从易用性和可维护性等多个角度都进行了改善。目前遗留的主要问题是很多EventBridge事件中无法进行对应节点Tag的传递，从而产生了很多无效的调用，希望后续能够得到完善，从而进一步简化调用的流程。另外从成本的角度来说，可以在本文的RouterLambda前再配一集中化的SQS，即所有事件统一发送到该SQS，利用Lambda的Batch机制批量处理对应请求，然后再进行批量发送到指定的下游队列中。
 
 
 ## 参考文档
