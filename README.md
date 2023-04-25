@@ -1,4 +1,4 @@
-# 基于karpenter的多集群Spot Interruption事件处理总线设计
+# Karpenter实践：多集群Spot Interruption事件分发总线设计
 ## 项目背景
 Karpenter是AWS提出的kubernetes工作节点动态伸缩工具，其区别于CA（Cluster AutoScaler），具有Groupless，效率高，跟AWS集成更为紧密等众多优势。目前，越来越多的客户开始使用Karpenter来简化和优化他们的EKS集群自动扩展流程。特别是对于那些需要快速增加或减少节点数量以适应流量波动的企业来说，Karpenter可以帮助他们更好地管理他们的资源。另外采用Spot作为EKS的工作节点也成为了很多客户节约成本的一大重要手段。在Karpenter中，对于如何处理Spot实例回收带来的不稳定性影响，提供了两种方案：
 * 方案1: 基于NTH（node termination handler）
@@ -8,7 +8,7 @@ Karpenter是AWS提出的kubernetes工作节点动态伸缩工具，其区别于C
 
 ## 方案介绍
 
-笔者首先根据个人理解绘制了当前的Interruption处理流程图
+首先，回顾一下目前官方的Spot Interruption的处理流程图
 
 ![](./images/original.png)
 
@@ -21,11 +21,11 @@ Karpenter是AWS提出的kubernetes工作节点动态伸缩工具，其区别于C
 * 每创建一个EKS集群，都对应的创建一组EvenBridge Rule和SQS对，用以接受和传递Interruption事件
 * 通过配置Karpenter Controller的configmap指向对应集群的SQS，来消费/处理上述事件
 
-其中如果在单账户单region集群少的情况下，上述的设计并无不妥。但是，在实验中我们发现当集群数量的多时候我们会发现几个明显的问题
+可以看到，如果在单账户单region集群少的情况下，上述的设计并无不妥。但是在客户的实际使用中，当集群数量的多时候我们会发现几个明显的问题:
 
 * 需要为每一个集群都创建一套规则，但是规则的内容却完全一样
   > 目前相关事件无法传递tag和基于tag过滤
-* 因为规则完全相同，任一集群发生的相关事件会发送到其他队列的SQS队列中进行消费
+* 因为规则完全相同，任一集群发生的相关事件会发送到其他队列的SQS队列中进行消费, 从而造成事件风暴
   > 查看源码可知，如果是非本集群消息，会直接进行删除
 
 基于该设计带来的管理复杂性问题，笔者协同客户首先进行了解耦的设计. 在进行详细阐述前，首先回顾下在官方文档中如何进行Karpenter及相关Interruption处理组件的安装.
@@ -116,13 +116,14 @@ Karpenter是AWS提出的kubernetes工作节点动态伸缩工具，其区别于C
     ```
 回顾完原始的步骤后，笔者最初和客户的设计为只在第一个集群的配置中配置Eventbridge Rule，后续集群只创建对应的SQS队列并动态在上述Rule中的添加新的SQS队列为Target。然而参照官方文档可知，同一条Eventbridge Rule最大的触发Target为5，并且为硬限制不可修改。考虑到该方案的局限性，故并不对此方案进行进一步探讨，但是我们应用同样的解耦思路进行下一方案的探索。
 
-## 基于Lambda Fan-Out改进方案的介绍及测试
+## 利用lambda实现事件分发总线的改进方案介绍及测试
 ### 方案介绍
 
-借鉴事件总线的处理逻辑，新方案采用基于Lambda作为事件总线，基于不同EKS集群的特定标签，进行事件的精准分发，项目的架构如下所示：
+借鉴事件总线的处理逻辑，新方案采用基于Lambda作为事件总线中心，基于不同EKS集群的特定标签，进行事件的精准分发，项目的架构如下所示：
 ![](./images/new_design.png)
 其整体的流程为：
 * 在第一个集群中生成中，配置全套的lambda和监听事件，在后续的集群/karpenter的安装中只生成对应集群的SQS和配置监听
+  > 此处也可以完全单独进行配置，与集群创建进行解偶。
 * 当对应集群有Interruption事件产生时，lambda函数通过instance-id得到对应的Tag从而判断发生事件的集群，进而把对应的事件指向性投递到队列中
 * 每个集群的Karpenter通过监听对应SQS队列，进行对应Interruption事件的处理
 
