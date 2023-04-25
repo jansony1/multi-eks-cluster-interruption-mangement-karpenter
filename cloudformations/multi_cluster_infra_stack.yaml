@@ -243,6 +243,10 @@ Resources:
       Targets:
         - Id: RouterLambda
           Arn: !GetAtt RouterLambda.Arn
+          RetryPolicy:
+            MaximumRetryAttempts: 2
+            MaximumEventAgeInSeconds: 60
+            RetryOnServiceExceptions: true
           DeadLetterConfig:
               Arn: !GetAtt DeadLetterQueue.Arn
   SpotInterruptionRule:
@@ -256,6 +260,10 @@ Resources:
       Targets:
         - Id: RouterLambda
           Arn: !GetAtt RouterLambda.Arn
+          RetryPolicy:
+            MaximumRetryAttempts: 2
+            MaximumEventAgeInSeconds: 60
+            RetryOnServiceExceptions: true
           DeadLetterConfig:
               Arn: !GetAtt DeadLetterQueue.Arn
   RebalanceRule:
@@ -269,6 +277,10 @@ Resources:
       Targets:
         - Id: RouterLambda
           Arn: !GetAtt RouterLambda.Arn
+          RetryPolicy:
+            MaximumRetryAttempts: 2
+            MaximumEventAgeInSeconds: 60
+            RetryOnServiceExceptions: true
           DeadLetterConfig:
               Arn: !GetAtt DeadLetterQueue.Arn
   InstanceStateChangeRule:
@@ -287,6 +299,10 @@ Resources:
       Targets:
         - Id: RouterLambda
           Arn: !GetAtt RouterLambda.Arn
+          RetryPolicy:
+            MaximumRetryAttempts: 2
+            MaximumEventAgeInSeconds: 60
+            RetryOnServiceExceptions: true
           DeadLetterConfig:
               Arn: !GetAtt DeadLetterQueue.Arn
 
