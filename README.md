@@ -239,19 +239,19 @@ EOF
 ```
 $ cat ./cloudformations/multi_cluster_infra_stack.yaml
 ```
-相较于社区原始的设计，此处把4类相关事件都把触发目标改为了基于Lambda的事件总线。然后在Lambda中基于EC2的tag来判断将事件发送到哪个Cluster种
+相较于社区原始的设计，此处把4类相关事件的触发目标都改为了基于Lambda的事件总线。然后在Lambda中基于EC2的tag来判断将事件发送到哪个SQS队列中进行后续处理。
 
 #### 其他业务集群部署
 对于除了需要配置事件总线的初始化集群以外的其他集群来说，主要的差别为
 * Cluster的名字需要在配置环境变量步骤进行替换
 * 对应的Cloudformation需要替换成非Infra版本的
   
-因此，我们摘取差异化的两步，进行部署，其他流程请参照基础版的集群部署
+因此，我们摘取差异化的两步进行部署，其他流程请参照基础版的集群部署
 
 配置环境变量
 ```
 $ export KARPENTER_VERSION=v0.27.3
-$ export CLUSTER_NAME="tenant-1-cluster"
+$ export CLUSTER_NAME="tenant-1"
 $ export AWS_DEFAULT_REGION="us-west-2"
 $ export AWS_ACCOUNT_ID="$(aws sts get-caller-identity --query Account --output text)"
 $ export TEMPOUT=$(mktemp)
@@ -457,6 +457,7 @@ Karpenter处理Interruption：https://karpenter.sh/v0.27.3/concepts/deprovisioni
 
 Karpenter源代码逻辑：https://github.com/aws/karpenter/blob/7afa5630980556742b2337574757dea9f9b99a29/pkg/controllers/interruption/controller.go
 
+Karpenter event定义: https://github.com/aws/karpenter/blob/7afa5630980556742b2337574757dea9f9b99a29/pkg/controllers/interruption/events/events.go
 
 
 
