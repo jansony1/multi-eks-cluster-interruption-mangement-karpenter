@@ -1,13 +1,10 @@
 AWSTemplateFormatVersion: "2010-09-09"
 Description: Resources used by https://github.com/aws/karpenter
-Parameters:
-  ClusterName:
-    Type: String
-    Description: "EKS cluster name"
+Resources:
   DeadLetterQueue:
     Type: AWS::SQS::Queue
     Properties:
-      QueueName: !Sub "${ClusterName}-DeadLetterQueue"
+      QueueName: !Sub "Karpenter-event-bus-DeadLetterQueue"
       MessageRetentionPeriod: 300
   RouterLambdaRole:
     Type: 'AWS::IAM::Role'
@@ -59,7 +56,7 @@ Parameters:
   RouterLambda:
     Type: 'AWS::Lambda::Function'
     Properties:
-      FunctionName: !Sub "${ClusterName}"
+      FunctionName: !Sub "karpenterRouterLambda"
       Code:
         ZipFile: |
           import boto3
