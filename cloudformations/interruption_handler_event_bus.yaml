@@ -52,7 +52,7 @@ Resources:
     Properties:
       FunctionName: !GetAtt RouterLambda.Arn
       Action: lambda:InvokeFunction
-      Principal: event.amazonaws.com
+      Principal: events.amazonaws.com
   RouterLambda:
     Type: 'AWS::Lambda::Function'
     Properties:
@@ -139,7 +139,6 @@ Resources:
           RetryPolicy:
             MaximumRetryAttempts: 2
             MaximumEventAgeInSeconds: 60
-            RetryOnServiceExceptions: true
           DeadLetterConfig:
               Arn: !GetAtt DeadLetterQueue.Arn
   SpotInterruptionRule:
@@ -156,7 +155,6 @@ Resources:
           RetryPolicy:
             MaximumRetryAttempts: 2
             MaximumEventAgeInSeconds: 60
-            RetryOnServiceExceptions: true
           DeadLetterConfig:
               Arn: !GetAtt DeadLetterQueue.Arn
   RebalanceRule:
@@ -173,7 +171,6 @@ Resources:
           RetryPolicy:
             MaximumRetryAttempts: 2
             MaximumEventAgeInSeconds: 60
-            RetryOnServiceExceptions: true
           DeadLetterConfig:
               Arn: !GetAtt DeadLetterQueue.Arn
   InstanceStateChangeRule:
@@ -195,6 +192,5 @@ Resources:
           RetryPolicy:
             MaximumRetryAttempts: 2
             MaximumEventAgeInSeconds: 60
-            RetryOnServiceExceptions: true
           DeadLetterConfig:
               Arn: !GetAtt DeadLetterQueue.Arn
