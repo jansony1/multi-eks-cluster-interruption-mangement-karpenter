@@ -1,4 +1,4 @@
-# Karpenter实践：多集群Spot Interruption事件分发总线设计
+# Karpenter实践：多集群Spot Interruption事件处理总线设计
 ## 项目背景
 Karpenter是AWS提出的kubernetes工作节点动态伸缩工具，其区别于CA（Cluster AutoScaler），具有Groupless，效率高，跟AWS集成更为紧密等众多优势。目前，越来越多的客户开始使用Karpenter来简化和优化他们的EKS集群自动扩展流程。特别是对于那些需要快速增加或减少节点数量以适应流量波动的企业来说，Karpenter可以帮助他们更好地管理他们的资源。另外采用Spot作为EKS的工作节点也成为了很多客户节约成本的一大重要手段。在Karpenter中，对于如何处理Spot实例回收带来的不稳定性影响，提供了两种方案：
 * 方案1: 基于NTH（node termination handler）
@@ -464,7 +464,7 @@ ip-192-168-87-89.us-west-2.compute.internal     Ready    <none>   160m   v1.24.1
 
 ## 总结
 
-本文阐述了一种客户在基于karpenter进行多集群Spot Interruption事件管理的优化设计，其从易用性和可维护性等多个角度都进行了改善。目前遗留的主要问题是很多EventBridge事件中无法进行对应节点Tag的传递，从而产生了很多无效的调用，希望后续能够得到完善，从而进一步简化调用的流程。另外从成本的角度来说，可以在本文的RouterLambda前再配一集中化的SQS，即所有事件统一发送到该SQS，利用Lambda的Batch机制批量处理对应请求，然后再进行批量发送到指定的下游队列中。
+本文阐述了一种客户在基于karpenter对多集群Spot Interruption事件管理的优化设计，其从易用性和可维护性等多个角度都进行了改善。另外从成本的角度来说，可以在本文的RouterLambda前再配一集中化的Amazon SQS，即所有事件统一发送到该Amazon SQS, 利用Amazon Lambda的Batch机制批量处理对应请求，然后再进行批量发送到指定的下游队列.
 
 
 ## 参考文档

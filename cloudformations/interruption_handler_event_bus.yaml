@@ -1,0 +1,203 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: Resources used by https://github.com/aws/karpenter
+Parameters:
+  ClusterName:
+    Type: String
+    Description: "EKS cluster name"
+  DeadLetterQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub "${ClusterName}-DeadLetterQueue"
+      MessageRetentionPeriod: 300
+  RouterLambdaRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service:
+            - lambda.amazonaws.com
+          Action:
+          - sts:AssumeRole
+      Path: /
+      Policies:
+      - PolicyName: MyLambdaEC2Policy
+        PolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+            - Effect: Allow
+              Action: ec2:DescribeInstances
+              Resource: '*'
+      - PolicyName: MyLambdaSQSPolicy
+        PolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+            - Effect: Allow
+              Action:
+                - sqs:GetQueueAttributes
+                - sqs:GetQueueUrl
+                - sqs:SendMessage
+              Resource: "*"
+      - PolicyName: MyLambdaPolicy
+        PolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+            - Effect: Allow
+              Action:
+              - logs:CreateLogGroup
+              - logs:CreateLogStream
+              - logs:PutLogEvents
+              Resource: arn:aws:logs:*:*:*
+  EventBridgeRBAC:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !GetAtt RouterLambda.Arn
+      Action: lambda:InvokeFunction
+      Principal: event.amazonaws.com
+  RouterLambda:
+    Type: 'AWS::Lambda::Function'
+    Properties:
+      FunctionName: !Sub "${ClusterName}"
+      Code:
+        ZipFile: |
+          import boto3
+          import json
+          import logging
+          default_log_args = {
+              "level":  logging.INFO,
+              "format": "%(asctime)s [%(levelname)s] %(name)s - %(message)s",
+              "datefmt": "%d-%b-%y %H:%M",
+              "force": True,
+          }
+          logging.basicConfig(**default_log_args)
+          logger = logging.getLogger("RouterLambda")
+          sqs = boto3.client('sqs')
+          ec2 = boto3.client('ec2')
+          # 4 types of event in total: 3 from EC2, 1 one health
+          def handler(event, context):
+                 
+              # health change envent
+              if event['resources'] and event['source'] == 'aws.health':
+                 instance_id = event['resources']
+                 logger.info("health event received for:"+ instance_id)
+              # EC2 type of event
+              else:
+                 instance_id = event['detail']['instance-id']
+                 logger.info("ec2 event received:"+ event['detail-type'])
+                 
+              filters=[
+                  {
+                      'Name': 'tag:aws:eks:cluster-name',
+                      'Values': [
+                          '*'
+                      ]
+                  },
+              ]
+              response = ec2.describe_instances(
+                  InstanceIds=[instance_id],Filters=filters
+              )
+              
+              if response['Reservations']:
+                 for tag in response['Reservations'][0]['Instances'][0]['Tags']:
+                     if tag['Key'] == 'aws:eks:cluster-name':
+                        ClusterName = tag['Value']
+                        break
+                 logger.info("a Message distributed to queue:" + ClusterName+ " was received")
+                 response = sqs.get_queue_url(QueueName=ClusterName)
+                 queue_url = response['QueueUrl']
+                 
+                 logger.info("queue url is:"+ queue_url)
+                  
+                 sqs.send_message(
+                     QueueUrl=queue_url,
+                     MessageBody=json.dumps(event)
+                 )
+                 logger.info("Message distributed to queue: " + ClusterName)
+                 return {
+                    'statusCode': 200,
+                    'body': json.dumps("Message distributed to queue:" + ClusterName)
+                 }
+              else: 
+                 return {
+                    'statusCode': 200,
+                    'body': json.dumps(instance_id+ ": not for Interruption handler")
+                 }
+      Handler: index.handler
+      Role: !GetAtt RouterLambdaRole.Arn
+      Runtime: python3.9
+      Timeout: 30
+  ScheduledChangeRule:
+    Type: 'AWS::Events::Rule'
+    Properties:
+      EventPattern:
+        source:
+          - aws.health
+        detail-type:
+          - AWS Health Event
+      Targets:
+        - Id: RouterLambda
+          Arn: !GetAtt RouterLambda.Arn
+          RetryPolicy:
+            MaximumRetryAttempts: 2
+            MaximumEventAgeInSeconds: 60
+            RetryOnServiceExceptions: true
+          DeadLetterConfig:
+              Arn: !GetAtt DeadLetterQueue.Arn
+  SpotInterruptionRule:
+    Type: 'AWS::Events::Rule'
+    Properties:
+      EventPattern:
+        source:
+          - aws.ec2
+        detail-type:
+          - EC2 Spot Instance Interruption Warning
+      Targets:
+        - Id: RouterLambda
+          Arn: !GetAtt RouterLambda.Arn
+          RetryPolicy:
+            MaximumRetryAttempts: 2
+            MaximumEventAgeInSeconds: 60
+            RetryOnServiceExceptions: true
+          DeadLetterConfig:
+              Arn: !GetAtt DeadLetterQueue.Arn
+  RebalanceRule:
+    Type: 'AWS::Events::Rule'
+    Properties:
+      EventPattern:
+        source:
+          - aws.ec2
+        detail-type:
+          - EC2 Instance Rebalance Recommendation
+      Targets:
+        - Id: RouterLambda
+          Arn: !GetAtt RouterLambda.Arn
+          RetryPolicy:
+            MaximumRetryAttempts: 2
+            MaximumEventAgeInSeconds: 60
+            RetryOnServiceExceptions: true
+          DeadLetterConfig:
+              Arn: !GetAtt DeadLetterQueue.Arn
+  InstanceStateChangeRule:
+    Type: 'AWS::Events::Rule'
+    Properties:
+      EventPattern:
+        source:
+          - aws.ec2
+        detail-type:
+          - EC2 Instance State-change Notification
+        detail:
+        state:
+          - "anything-but":
+            - "pending"
+            - "running"
+      Targets:
+        - Id: RouterLambda
+          Arn: !GetAtt RouterLambda.Arn
+          RetryPolicy:
+            MaximumRetryAttempts: 2
+            MaximumEventAgeInSeconds: 60
+            RetryOnServiceExceptions: true
+          DeadLetterConfig:
+              Arn: !GetAtt DeadLetterQueue.Arn
