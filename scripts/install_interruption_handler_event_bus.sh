@@ -6,7 +6,7 @@ export AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output tex
 export TEMPOUT=$(mktemp)
 
 aws cloudformation deploy \
-    --stack-name "Karpenter-interruption_handler_event_bus" \
+    --stack-name "Karpenter-interruption-handler-event-bus" \
     --template-file ./cloudformations/interruption_handler_event_bus.yaml \
     --capabilities CAPABILITY_NAMED_IAM 
 
