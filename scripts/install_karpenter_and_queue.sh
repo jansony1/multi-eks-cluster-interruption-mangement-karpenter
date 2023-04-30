@@ -10,10 +10,10 @@ aws cloudformation deploy \
     --stack-name "Karpenter-${CLUSTER_NAME}-role-and-interruption-queue" \
     --template-file ./cloudformations/karpenter_role_and_interruption_queue.yaml \
     --capabilities CAPABILITY_NAMED_IAM \
-    --parameter-overrides "ClusterName=${CLUSTER_NAME}"; &&
+    --parameter-overrides "ClusterName=${CLUSTER_NAME}" && \
 
 
-docker logout public.ecr.aws &&
+docker logout public.ecr.aws && \
 
 helm upgrade --install karpenter oci://public.ecr.aws/karpenter/karpenter --version ${KARPENTER_VERSION} --namespace karpenter --create-namespace \
   --set serviceAccount.annotations."eks\.amazonaws\.com/role-arn"=${KARPENTER_IAM_ROLE_ARN} \

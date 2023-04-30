@@ -37,7 +37,7 @@ iamIdentityMappings:
     - system:bootstrappers
     - system:nodes
 
-  managedNodeGroups:
+managedNodeGroups:
   - instanceType: m5.large
     amiFamily: AmazonLinux2
     name: ${CLUSTER_NAME}-ng
