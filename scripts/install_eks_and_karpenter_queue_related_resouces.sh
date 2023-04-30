@@ -7,6 +7,15 @@ export AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output tex
 export TEMPOUT=$(mktemp)
 
 
+# deploy karpenter related policy, role, and event queue
+aws cloudformation deploy \
+    --stack-name "Karpenter-${CLUSTER_NAME}-role-and-interruption-queue" \
+    --template-file ./cloudformations/karpenter_role_and_interruption_queue.yaml \
+    --capabilities CAPABILITY_NAMED_IAM \
+    --parameter-overrides "ClusterName=${CLUSTER_NAME}" 
+
+
+# deploy eks
 
 eksctl create cluster -f - <<EOF
 ---
@@ -43,3 +52,4 @@ managedNodeGroups:
     name: ${CLUSTER_NAME}-ng
     desiredCapacity: 2
 EOF
+
