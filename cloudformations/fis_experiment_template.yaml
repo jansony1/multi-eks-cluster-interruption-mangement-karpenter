@@ -1,0 +1,33 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: Resources used by https://github.com/aws/karpenter
+Parameters:
+  ClusterName:
+    Type: String
+    Description: Cluster Name.
+Resources:
+  FisExperiment:
+    Type: AWS::FIS::Experiment
+    Properties:
+      Description: A Fault Injection Simulator experiment for testing spot-instance-interruptions .
+      Targets:
+        - ResourceTags:
+            - Key: 'aws:eks:cluster-name'
+              Value: !Ref ${ClusterName}
+          ResourceType: AWS::EC2::Instance
+      Actions:
+        - Type: aws:ec2:send-spot-instance-interruptions
+          Parameters: 
+            durationBeforeInterruption: 'PT2M'
+      RoleArn: !GetAtt FISRole.Arn
+  FISRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement: 
+          - Effect: Allow
+            Principal:
+              Service: 'fis.amazonaws.com'
+            Action: 'sts:AssumeRole'
+      ManagedPolicyArns:
+        - !Sub "arn:aws:iam::aws:policy/service-role/AWSFaultInjectionSimulatorEC2Access"
