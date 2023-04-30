@@ -9,19 +9,19 @@ Resources:
     Type: AWS::FIS::ExperimentTemplate
     Properties:
       Description: A Fault Injection Simulator experiment for testing spot-instance-interruptions .
-      Targets:
-        spotInTargetCluster:
-          ResourceTags:
-            aws:eks:cluster-name : !Sub '${ClusterName}'
-          ResourceType: 'aws:ec2:instance'
-          SelectionMode: ALL
       Actions: 
         spotInstanceinterruption:
           ActionId: 'aws:ec2:send-spot-instance-interruptions'
           Parameters: 
             durationBeforeInterruption: 'PT2M'
           Targets:
-            Instances: spotInTargetCluster    
+            SpotInstances: spotInTargetCluster
+      Targets:
+        spotInTargetCluster:
+          ResourceTags:
+            aws:eks:cluster-name : !Sub '${ClusterName}'
+          ResourceType: 'aws:ec2:instance'
+          SelectionMode: ALL   
       RoleArn: !GetAtt FISRole.Arn
       StopConditions:
         - Source: 'none'
