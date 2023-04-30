@@ -54,6 +54,5 @@ Resources:
           Statement:
             - Effect: Allow
               Action:
-              - logs:PutLogEvents
-              - logs:CreateLogDelivery
+              - logs: *
               Resource: '*'
