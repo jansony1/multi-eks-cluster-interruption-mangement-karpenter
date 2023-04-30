@@ -1,5 +1,5 @@
 AWSTemplateFormatVersion: "2010-09-09"
-Description: Resources used by https://github.com/aws/karpenter
+Description: FIS experiments template
 Parameters:
   ClusterName:
     Type: String
@@ -56,4 +56,4 @@ Resources:
               Action:
               - logs:PutLogEvents
               - logs:CreateLogDelivery
-              Resource: !GetAtt FISLogGroup.Arn
+              Resource: '*'

@@ -1,5 +1,5 @@
 AWSTemplateFormatVersion: "2010-09-09"
-Description: Resources used by https://github.com/aws/karpenter
+Description: CF for event bus setting, including Amazon EventBridge Rule and lambda
 Resources:
   DeadLetterQueue:
     Type: AWS::SQS::Queue
