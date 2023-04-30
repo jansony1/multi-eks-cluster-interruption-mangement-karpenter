@@ -20,7 +20,7 @@ Resources:
         spotInTargetCluster:
           ResourceTags:
             aws:eks:cluster-name : !Sub '${ClusterName}'
-          ResourceType: 'aws:ec2:instance'
+          ResourceType: 'aws:ec2:spot-instance'
           SelectionMode: ALL   
       RoleArn: !GetAtt FISRole.Arn
       StopConditions:
