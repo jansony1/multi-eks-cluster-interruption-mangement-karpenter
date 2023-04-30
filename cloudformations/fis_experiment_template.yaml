@@ -9,7 +9,7 @@ Resources:
     Type: AWS::Logs::LogGroup
     Properties: 
       LogGroupName: 'fis-log-group'
-  FisExperiment:
+  FISExperiment:
     Type: AWS::FIS::ExperimentTemplate
     Properties:
       Description: A Fault Injection Simulator experiment for testing spot-instance-interruptions .
@@ -53,4 +53,4 @@ Resources:
             - Effect: Allow
               Action:
               - logs:PutLogEvents
-              Resource: FISLogGroup.Arn
+              Resource: !GetAtt FISLogGroup.Arn
