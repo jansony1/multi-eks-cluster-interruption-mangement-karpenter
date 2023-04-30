@@ -30,7 +30,7 @@ Resources:
       StopConditions:
         - Source: 'none'
       Tags: 
-        Name: 'SpotInterruptionTest'
+        Name: !Sub 'SpotInterruptionTest-${ClusterName}'
       LogConfiguration:
         LogSchemaVersion: 1
         CloudWatchLogsConfiguration:
@@ -55,4 +55,5 @@ Resources:
             - Effect: Allow
               Action:
               - logs:PutLogEvents
+              -  ogs:CreateLogDelivery
               Resource: !GetAtt FISLogGroup.Arn
