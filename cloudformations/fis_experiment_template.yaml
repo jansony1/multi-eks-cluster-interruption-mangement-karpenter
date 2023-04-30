@@ -12,7 +12,7 @@ Resources:
       Targets:
         - ResourceTags:
             - Key: 'aws:eks:cluster-name'
-              Value: !Ref ${ClusterName}
+              Value: !Sub ${ClusterName}
           ResourceType: AWS::EC2::Instance
       Actions:
         - Type: aws:ec2:send-spot-instance-interruptions
