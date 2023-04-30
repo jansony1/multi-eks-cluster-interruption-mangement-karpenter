@@ -1,12 +1,9 @@
 AWSTemplateFormatVersion: "2010-09-09"
 Description: Resources used by https://github.com/aws/karpenter
 Parameters:
-  TagKey:
+  ClusterName:
     Type: String
-    Description: The key of the tag to use for targeting resources.
-  TagValue:
-    Type: String
-    Description: The value of the tag to use for targeting resources.
+    Description: Cluster Name.
 Resources:
   FisExperiment:
     Type: AWS::FIS::Experiment
@@ -14,8 +11,8 @@ Resources:
       Description: A Fault Injection Simulator experiment for testing spot-instance-interruptions .
       Targets:
         - ResourceTags:
-            - Key: !Ref TagKey
-              Value: !Ref TagValue
+            - Key: 'aws:eks:cluster-name'
+              Value: !Ref ${ClusterName}
           ResourceType: AWS::EC2::Instance
       Actions:
         - Type: aws:ec2:send-spot-instance-interruptions
