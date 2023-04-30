@@ -5,6 +5,10 @@ Parameters:
     Type: String
     Description: Cluster Name.
 Resources:
+  FISLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties: 
+      LogGroupName: 'fis-log-group'
   FisExperiment:
     Type: AWS::FIS::ExperimentTemplate
     Properties:
@@ -27,6 +31,8 @@ Resources:
         - Source: 'none'
       Tags: 
         Name: 'SpotInterruptionTest'
+      CloudWatchLogsConfiguration:
+        LogGroupArn: !GetAtt FISLogGroup.Arn
   FISRole:
     Type: 'AWS::IAM::Role'
     Properties:
@@ -39,3 +45,12 @@ Resources:
             Action: 'sts:AssumeRole'
       ManagedPolicyArns:
         - !Sub "arn:aws:iam::aws:policy/service-role/AWSFaultInjectionSimulatorEC2Access"
+      Policies:
+      - PolicyName: FISCloudWatch
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                - logs:PutLogEvents
+                Resource: FISLogGroup.Arn
