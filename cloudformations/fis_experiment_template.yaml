@@ -12,8 +12,9 @@ Resources:
       Targets:
         spotInTargetCluster:
           ResourceTags:
-            'aws:eks:cluster-name': !Sub '${ClusterName}'
+            aws:eks:cluster-name : !Sub '${ClusterName}'
           ResourceType: 'aws:ec2:instance'
+          SelectionMode: ALL
       Actions: 
         spotInstanceinterruption:
           ActionId: 'aws:ec2:send-spot-instance-interruptions'
