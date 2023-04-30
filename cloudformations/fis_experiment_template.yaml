@@ -47,10 +47,10 @@ Resources:
         - !Sub "arn:aws:iam::aws:policy/service-role/AWSFaultInjectionSimulatorEC2Access"
       Policies:
       - PolicyName: FISCloudWatch
-          PolicyDocument:
-            Version: '2012-10-17'
-            Statement:
-              - Effect: Allow
-                Action:
-                - logs:PutLogEvents
-                Resource: FISLogGroup.Arn
+        PolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+            - Effect: Allow
+              Action:
+              - logs:PutLogEvents
+              Resource: FISLogGroup.Arn
