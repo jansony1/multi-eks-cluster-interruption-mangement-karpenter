@@ -31,8 +31,9 @@ Resources:
         - Source: 'none'
       Tags: 
         Name: 'SpotInterruptionTest'
-      CloudWatchLogsConfiguration:
-        LogGroupArn: !GetAtt FISLogGroup.Arn
+      LogConfiguration:
+        CloudWatchLogsConfiguration:
+          LogGroupArn: !GetAtt FISLogGroup.Arn
   FISRole:
     Type: 'AWS::IAM::Role'
     Properties:
