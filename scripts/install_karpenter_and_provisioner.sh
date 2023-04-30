@@ -5,7 +5,7 @@ export CLUSTER_NAME=$1
 export AWS_DEFAULT_REGION="us-west-2"
 export AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
 export TEMPOUT=$(mktemp)
-export CLUSTER_ENDPOINT="$(aws eks describe-cluster --name ${CLUSTER_NAME} --query "cluster.endpoint" --output text)"
+export CLUSTER_ENDPOINT=$(aws eks describe-cluster --name ${CLUSTER_NAME} --query "cluster.endpoint" --output text)
 export KARPENTER_IAM_ROLE_ARN="arn:aws:iam::${AWS_ACCOUNT_ID}:role/${CLUSTER_NAME}-karpenter"
 
 
