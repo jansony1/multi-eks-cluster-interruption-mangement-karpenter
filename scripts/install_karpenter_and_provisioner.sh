@@ -36,7 +36,7 @@ spec:
       values: ["spot"]
     - key: node.kubernetes.io/instance-type
       operator: In
-      values: ["m5.xlarge", "m5.2xlarge"]
+      values: ["m5.xlarge"]
   providerRef:
     name: default
   ttlSecondsAfterEmpty: 30
