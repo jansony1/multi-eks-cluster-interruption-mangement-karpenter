@@ -6,7 +6,7 @@ Parameters:
     Description: Cluster Name.
 Resources:
   FisExperiment:
-    Type: AWS::FIS::Experiment
+    Type: AWS::FIS::ExperimentTemplate
     Properties:
       Description: A Fault Injection Simulator experiment for testing spot-instance-interruptions .
       Targets:
