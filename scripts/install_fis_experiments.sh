@@ -8,7 +8,7 @@ export TEMPOUT=$(mktemp)
 
 aws cloudformation deploy \
     --stack-name "Karpenter-${CLUSTER_NAME}-FIS-experiments" \
-    --template-file ./cloudformations/fis_template.yaml \
+    --template-file ./cloudformations/fis_experiment_template.yaml \
     --capabilities CAPABILITY_NAMED_IAM \
     --parameter-overrides "ClusterName=${CLUSTER_NAME}"
 
