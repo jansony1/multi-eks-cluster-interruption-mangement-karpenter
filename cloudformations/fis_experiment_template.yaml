@@ -32,7 +32,7 @@ Resources:
       Tags: 
         Name: 'SpotInterruptionTest'
       LogConfiguration:
-        logSchemaVersion: 1
+        LogSchemaVersion: 1
         CloudWatchLogsConfiguration:
           LogGroupArn: !GetAtt FISLogGroup.Arn
   FISRole:
